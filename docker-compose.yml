@@ -1,0 +1,27 @@
+services:
+  financeiro-whatsapp:
+    build: .
+    container_name: sistema-financeiro-whatsapp
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      - PORT=3000
+      - NODE_ENV=production
+      - DATABASE_PATH=/app/data/financeiro.db
+      # As variáveis abaixo devem ser definidas no painel do Dokploy
+      - EVOLUTION_API_URL=${EVOLUTION_API_URL}
+      - EVOLUTION_API_KEY=${EVOLUTION_API_KEY}
+      - EVOLUTION_INSTANCE=${EVOLUTION_INSTANCE}
+      - ALLOWED_NUMBERS=${ALLOWED_NUMBERS:-}
+    volumes:
+      - financeiro-data:/app/data
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  financeiro-data:
