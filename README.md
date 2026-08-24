@@ -28,13 +28,13 @@ Ideal para uso pessoal ou pequenos negócios. Tudo via mensagens de texto — se
 
 ## 🛠️ Pré-requisitos
 
-1. **Node.js** 18+ instalado
+1. **Node.js** 18+ instalado (ou Docker)
 2. Uma instância da **[Evolution API](https://github.com/EvolutionAPI/evolution-api)** rodando (self-hosted ou cloud)
 3. Uma instância WhatsApp conectada na Evolution (com QR Code)
 
 ---
 
-## 🚀 Instalação Rápida
+## 🚀 Instalação Rápida (local)
 
 ```bash
 # 1. Clone o repositório
@@ -51,6 +51,30 @@ cp .env.example .env
 # 4. Inicie o servidor
 npm start
 ```
+
+---
+
+## 🐳 Deploy no Dokploy (recomendado)
+
+O repositório já contém `Dockerfile` e `docker-compose.yml` prontos.
+
+### Passo a passo no Dokploy:
+
+1. Crie um novo aplicativo → **Compose**
+2. Conecte o repositório: `admsouzacode-ops/sistema-financeiro-whatsapp`
+3. Branch: `main`
+4. No painel de **Environment Variables**, adicione:
+
+| Variável | Exemplo |
+|----------|---------|
+| `EVOLUTION_API_URL` | `https://sua-evolution-api.com` |
+| `EVOLUTION_API_KEY` | `sua-chave-api` |
+| `EVOLUTION_INSTANCE` | `nome-da-instancia` |
+| `ALLOWED_NUMBERS` | `5511999999999` (opcional) |
+
+5. Clique em **Deploy**
+
+O volume `financeiro-data` é criado automaticamente para persistir o banco SQLite.
 
 ---
 
@@ -150,6 +174,8 @@ Bot: 📋 Últimas 10 transações
 │   ├── evolution.js      # Cliente da Evolution API
 │   └── utils.js          # Helpers (formatação, parsing)
 ├── data/                 # Banco de dados (criado automaticamente)
+├── Dockerfile
+├── docker-compose.yml
 ├── .env.example
 ├── package.json
 └── README.md
@@ -157,13 +183,13 @@ Bot: 📋 Últimas 10 transações
 
 ---
 
-## ☁️ Deploy (sugestões)
+## ☁️ Outras opções de Deploy
 
-- **Railway** / **Render** / **Fly.io** → ideal para Node.js
+- **Railway** / **Render** / **Fly.io**
 - **VPS** (DigitalOcean, Contabo, Hetzner) + PM2
-- **Docker** (pode adicionar um Dockerfile facilmente)
+- **Docker** puro: `docker compose up -d --build`
 
-Lembre-se de configurar a variável `DATABASE_PATH` e manter o volume persistente se usar container.
+Lembre-se de configurar as variáveis de ambiente e manter o volume persistente.
 
 ---
 
