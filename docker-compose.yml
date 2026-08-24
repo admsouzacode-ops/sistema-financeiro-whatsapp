@@ -3,13 +3,13 @@ services:
     build: .
     container_name: sistema-financeiro-whatsapp
     restart: unless-stopped
-    ports:
-      - "3100:3000"   # Porta externa 3100 → interna 3000
+    # Não mapeamos porta no host — o Dokploy/Traefik gerencia isso
+    expose:
+      - "3000"
     environment:
       - PORT=3000
       - NODE_ENV=production
       - DATABASE_PATH=/app/data/financeiro.db
-      # As variáveis abaixo devem ser definidas no painel do Dokploy
       - EVOLUTION_API_URL=${EVOLUTION_API_URL}
       - EVOLUTION_API_KEY=${EVOLUTION_API_KEY}
       - EVOLUTION_INSTANCE=${EVOLUTION_INSTANCE}
