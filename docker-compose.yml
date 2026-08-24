@@ -4,7 +4,7 @@ services:
     container_name: sistema-financeiro-whatsapp
     restart: unless-stopped
     ports:
-      - "3000:3000"
+      - "3100:3000"   # Porta externa 3100 → interna 3000
     environment:
       - PORT=3000
       - NODE_ENV=production
