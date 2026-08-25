@@ -46,6 +46,8 @@ const HELP_TEXT = `📊 *Sistema Financeiro — MEI*
 • "paguei o Nubank" → quita a dívida
 • "paguei 1000 do Nubank" → pagamento parcial
 
+🗑️ *desfazer* — Remove a última movimentação
+
 🎤 *Pode mandar áudio também!*`;
 
 async function handleWebhook(payload) {
@@ -105,6 +107,12 @@ async function handleWebhook(payload) {
 async function processCommand(phone, text) {
   const lower = text.toLowerCase().trim();
   const cmd = lower.startsWith('/') ? lower.slice(1) : lower;
+
+  // Ignora mensagens muito curtas que são claramente respostas de outras automações
+  // (ex: "1", "2", "3", "sim", "não")
+  if (/^\d{1,2}$/.test(cmd) || ['sim', 'não', 'nao', 'ok', 's', 'n'].includes(cmd)) {
+    return null; // não responde nada
+  }
 
   // AJUDA
   if (['ajuda', 'help', 'menu', 'comandos', 'inicio', 'start'].includes(cmd)) {
@@ -186,7 +194,7 @@ async function processCommand(phone, text) {
     return handleIncome(phone, text);
   }
 
-  // ===== GASTO / DESPESA =====
+  // ===== GASTO / DESPESA (só com palavras-chave claras) =====
   if (
     cmd.startsWith('gasto ') || cmd.startsWith('despesa ') || cmd.startsWith('saida ') ||
     cmd.startsWith('gastei ') || cmd.includes('gastei ')
@@ -194,7 +202,7 @@ async function processCommand(phone, text) {
     return handleExpense(phone, text);
   }
 
-  // Frases naturais de gasto
+  // Frases naturais de gasto (agora bem mais rigoroso)
   const naturalExpense = tryNaturalExpense(phone, text);
   if (naturalExpense) return naturalExpense;
 
@@ -254,7 +262,8 @@ async function processCommand(phone, text) {
     return `🗑️ Movimentação #${id} removida.\n\nSaldo geral: *${formatCurrency(balance)}*`;
   }
 
-  return `❓ Não entendi.\n\nDigite *ajuda* para ver os comandos.\n\nExemplos:\n• "gastei 80 no Nubank"\n• "recebi 3000 do cliente"\n• "mês" → resumo deste mês\n• "paguei o Nubank"`;
+  // Mensagens que não são comandos → não responde (evita interferir em outras conversas)
+  return null;
 }
 
 // ==================== HELPERS ====================
@@ -273,7 +282,6 @@ function formatMonthSummary(phone, which = 'current') {
   const emoji = balance >= 0 ? '🟢' : '🔴';
   msg += `${emoji} *Resultado do mês: ${formatCurrency(balance)}*`;
 
-  // Mostra também quantas movimentações teve
   const txs = getTransactionsForPeriod(phone, range.start, range.end, 1000);
   if (txs.length > 0) {
     msg += `\n\n📋 ${txs.length} movimentação(ões) neste mês`;
@@ -323,7 +331,6 @@ function formatFullBalance(phone) {
   msg += `━━━━━━━━━━━━━━\n`;
   msg += `💵 *Saldo geral: ${formatCurrency(balance)}*\n`;
 
-  // Destaque do mês atual
   msg += `\n📅 *${currentMonth.label}*\n`;
   msg += `   Receitas: ${formatCurrency(monthData.income)}\n`;
   msg += `   Despesas: ${formatCurrency(monthData.expense)}\n`;
@@ -520,14 +527,36 @@ function handlePayment(phone, text) {
   return msg;
 }
 
+/**
+ * Só aceita gasto natural se tiver INTENÇÃO CLARA:
+ * - Tem R$ ou "reais"
+ * - Ou tem indicação de conta/cartão ("no Nubank")
+ * - E NÃO é só um número isolado
+ */
 function tryNaturalExpense(phone, text) {
+  const trimmed = text.trim();
+
+  // Bloqueia números isolados (1, 2, 3, 50, 100...)
+  if (/^[\d.,]+$/.test(trimmed)) {
+    return null;
+  }
+
+  // Bloqueia mensagens muito curtas sem contexto
+  if (trimmed.length < 5) {
+    return null;
+  }
+
   const parsed = parseAmountAndDescription(text);
   if (!parsed) return null;
 
-  const hasAccountHint = /\b(no|na|do|da|em|cart[aã]o|nubank|inter|c6|neon)\b/i.test(text);
+  const hasAccountHint = /\b(no|na|do|da|em|cart[aã]o|nubank|inter|c6|neon|will|picpay)\b/i.test(text);
   const hasCurrency = /R\$|reais?/i.test(text);
+  const hasExpenseWord = /gastei|gasto|despesa|paguei|comprei|foi/i.test(text);
 
-  if (!hasAccountHint && !hasCurrency && parsed.description.length > 25) return null;
+  // Só registra se tiver pelo menos uma indicação clara de intenção
+  if (!hasAccountHint && !hasCurrency && !hasExpenseWord) {
+    return null;
+  }
 
   return registerExpense(phone, parsed, text);
 }
