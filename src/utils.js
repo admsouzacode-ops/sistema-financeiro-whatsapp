@@ -9,48 +9,87 @@ function formatCurrency(value) {
 }
 
 /**
- * Extrai número e descrição de textos como:
- * "45,90 almoço"
- * "100.50 uber para o aeroporto"
- * "2500"
+ * Limpa e converte string de valor brasileiro para número
+ * Aceita: 2644,03 | 2.644,03 | 2.644.03 | 2644.03 | R$ 2.644,03
+ */
+function parseBrazilianNumber(str) {
+  if (!str) return null;
+
+  let cleaned = String(str)
+    .replace(/R\$\s*/gi, '')
+    .replace(/reais?/gi, '')
+    .replace(/\s/g, '')
+    .trim();
+
+  // Se tem vírgula e ponto → assume formato BR (ponto = milhar, vírgula = decimal)
+  if (cleaned.includes(',') && cleaned.includes('.')) {
+    cleaned = cleaned.replace(/\./g, '').replace(',', '.');
+  }
+  // Só vírgula → decimal BR
+  else if (cleaned.includes(',')) {
+    cleaned = cleaned.replace(',', '.');
+  }
+  // Só ponto → pode ser decimal ou milhar. Se tiver mais de 2 dígitos depois do ponto, trata como milhar
+  else if (cleaned.includes('.')) {
+    const parts = cleaned.split('.');
+    if (parts.length > 2 || (parts[1] && parts[1].length === 3 && parts.length === 2)) {
+      // milhar: 2.644 ou 1.234.567
+      cleaned = cleaned.replace(/\./g, '');
+    }
+    // senão deixa como decimal (2644.03)
+  }
+
+  const amount = parseFloat(cleaned);
+  return isNaN(amount) || amount <= 0 ? null : amount;
+}
+
+/**
+ * Extrai valor + descrição de textos variados
+ * Exemplos que agora funcionam:
+ * - "45,90 almoço"
+ * - "R$ 2.644,03 no Nubank"
+ * - "gastei 200 no mercado"
+ * - "2.644,03 Nubank"
  */
 function parseAmountAndDescription(text) {
+  if (!text) return null;
+
   const cleaned = text.trim();
-  // Captura número no início (aceita 1.234,56 ou 1234.56 ou 1234,56)
-  const match = cleaned.match(/^([\d.,]+)\s*(.*)$/);
+
+  // Procura o primeiro número (com possível R$ na frente)
+  const match = cleaned.match(/(?:R\$\s*)?([\d.,]+)\s*(.*)$/i);
 
   if (!match) return null;
 
-  let amountStr = match[1]
-    .replace(/\./g, '') // remove pontos de milhar
-    .replace(',', '.'); // troca vírgula decimal por ponto
+  const amount = parseBrazilianNumber(match[1]);
+  if (!amount) return null;
 
-  const amount = parseFloat(amountStr);
-  if (isNaN(amount) || amount <= 0) return null;
+  let description = (match[2] || '').trim();
 
-  const description = (match[2] || '').trim() || 'Sem descrição';
+  // Remove palavras de comando que sobraram
+  description = description
+    .replace(/^(gastei|gasto|despesa|paguei|recebi|entrada|receita|no|na|do|da|em|de)\s+/i, '')
+    .trim();
+
+  if (!description) description = 'Sem descrição';
 
   return { amount, description };
 }
 
 /**
- * Tenta extrair um valor de qualquer lugar da frase
- * Ex: "paguei 1500 do nubank" → 1500
+ * Extrai apenas o valor de qualquer lugar da frase
  */
 function extractAmount(text) {
-  const match = text.match(/([\d.,]+)/);
+  if (!text) return null;
+
+  const match = text.match(/(?:R\$\s*)?([\d.,]+)/i);
   if (!match) return null;
 
-  let amountStr = match[1]
-    .replace(/\./g, '')
-    .replace(',', '.');
-
-  const amount = parseFloat(amountStr);
-  return isNaN(amount) || amount <= 0 ? null : amount;
+  return parseBrazilianNumber(match[1]);
 }
 
 /**
- * Normaliza o número de telefone (remove tudo que não é dígito)
+ * Normaliza o número de telefone
  */
 function normalizePhone(jid) {
   if (!jid) return '';
@@ -87,13 +126,11 @@ function formatDate(dateStr) {
 }
 
 /**
- * Detecta se o texto menciona um cartão/conta conhecido
- * e tenta extrair o nome da conta
+ * Tenta extrair nome de conta/cartão do texto
  */
 function extractAccountFromText(text) {
   const lower = text.toLowerCase();
 
-  // Palavras que geralmente precedem o nome da conta
   const patterns = [
     /(?:no|na|do|da|em|pelo|pela)\s+([a-z0-9\s]{2,30}?)(?:\s|$|,|\.|!|\?)/i,
     /cart[aã]o\s+([a-z0-9\s]{2,20})/i,
@@ -104,7 +141,6 @@ function extractAccountFromText(text) {
     const match = lower.match(pattern);
     if (match && match[1]) {
       let name = match[1].trim();
-      // Remove palavras comuns que não fazem parte do nome
       name = name.replace(/\b(reais?|real|r\$|de|do|da|no|na|em|com|para|por)\b/gi, '').trim();
       if (name.length >= 2) return name;
     }
@@ -115,6 +151,7 @@ function extractAccountFromText(text) {
 
 module.exports = {
   formatCurrency,
+  parseBrazilianNumber,
   parseAmountAndDescription,
   extractAmount,
   normalizePhone,

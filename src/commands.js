@@ -7,8 +7,7 @@ const {
   getOrCreateAccount,
   findAccount,
   getAccounts,
-  updateAccountBalance,
-  setAccountBalance
+  updateAccountBalance
 } = require('./db');
 const { sendText, getMediaBase64 } = require('./evolution');
 const { transcribeAudio } = require('./transcription');
@@ -142,7 +141,7 @@ async function processCommand(phone, text) {
   }
 
   // ===== SALDO =====
-  if (cmd === 'saldo' || cmd === 'balance' || cmd.includes('meu saldo')) {
+  if (cmd === 'saldo' || cmd === 'balance' || cmd.includes('meu saldo') || cmd.includes('qual meu saldo') || cmd.includes('qual é o meu saldo')) {
     return formatFullBalance(phone);
   }
 
@@ -158,18 +157,12 @@ async function processCommand(phone, text) {
   // ===== GASTO / DESPESA =====
   if (
     cmd.startsWith('gasto ') || cmd.startsWith('despesa ') || cmd.startsWith('saida ') ||
-    cmd.startsWith('gastei ') || cmd.startsWith('paguei ') || // paguei já tratado acima, mas deixa
-    cmd.includes('gastei ') || cmd.includes('paguei ')
+    cmd.startsWith('gastei ') || cmd.includes('gastei ')
   ) {
-    // Se chegou aqui e tem "paguei", já foi tratado. Só processa gasto normal.
-    if (cmd.startsWith('paguei ') || cmd.startsWith('pagar ')) {
-      return handlePayment(phone, text);
-    }
     return handleExpense(phone, text);
   }
 
-  // Frases naturais de gasto sem a palavra "gastei"
-  // Ex: "50 no Nubank", "dois mil de cartão Nubank"
+  // Frases naturais de gasto (ex: "50 no Nubank", "R$ 2.644,03 no Nubank")
   const naturalExpense = tryNaturalExpense(phone, text);
   if (naturalExpense) return naturalExpense;
 
@@ -229,7 +222,7 @@ async function processCommand(phone, text) {
     return `🗑️ Movimentação #${id} removida.\n\nSaldo geral: *${formatCurrency(balance)}*`;
   }
 
-  return `❓ Não entendi.\n\nDigite *ajuda* para ver os comandos.\n\nExemplos de áudio/texto:\n• "gastei 80 no Nubank"\n• "recebi 3000 do cliente"\n• "paguei o Nubank"\n• "qual meu saldo"`;
+  return `❓ Não entendi.\n\nDigite *ajuda* para ver os comandos.\n\nExemplos:\n• "gastei 80 no Nubank"\n• "recebi 3000 do cliente"\n• "paguei o Nubank"\n• "qual meu saldo"`;
 }
 
 // ==================== HELPERS ====================
@@ -299,30 +292,38 @@ function formatCardsList(phone) {
 }
 
 function handleExpense(phone, text) {
-  let parts = text
-    .replace(/^\/?gasto\s+|^\/?despesa\s+|^\/?saida\s+/i, '')
-    .replace(/^(gastei|paguei)\s+/i, '')
+  // Remove palavras de comando para facilitar o parse
+  let cleanText = text
+    .replace(/^(gastei|gasto|despesa|saida)\s+/i, '')
+    .replace(/^R\$\s*/i, '')
     .trim();
 
-  const parsed = parseAmountAndDescription(parts);
+  const parsed = parseAmountAndDescription(cleanText);
   if (!parsed) {
-    return '❌ Não identifiquei o valor.\nEx: *gastei 45,90 almoço* ou *gastei 200 no Nubank*';
+    // Tenta de novo no texto original (caso o R$ atrapalhe)
+    const parsed2 = parseAmountAndDescription(text);
+    if (!parsed2) {
+      return '❌ Não identifiquei o valor.\nEx: *gastei 45,90 almoço* ou *gastei 200 no Nubank*';
+    }
+    return registerExpense(phone, parsed2, text);
   }
 
+  return registerExpense(phone, parsed, text);
+}
+
+function registerExpense(phone, parsed, originalText) {
   // Tenta detectar conta no texto
-  const accountName = extractAccountFromText(text) || extractAccountFromText(parsed.description);
+  const accountName = extractAccountFromText(originalText) || extractAccountFromText(parsed.description);
   let account = null;
 
   if (accountName) {
-    // Se menciona cartão ou nomes comuns de cartão, cria como credit
-    const isLikelyCredit = /nubank|inter|c6|neon|will|picpay|cart[aã]o|credit/i.test(accountName) ||
-                           /nubank|inter|c6|neon|will|picpay|cart[aã]o|credit/i.test(text);
+    const isLikelyCredit = /nubank|inter|c6|neon|will|picpay|cart[aã]o|credit|ita[uú]|bradesco|santander|bb|caixa/i.test(accountName) ||
+                           /nubank|inter|c6|neon|will|picpay|cart[aã]o|credit/i.test(originalText);
     account = getOrCreateAccount(phone, accountName, isLikelyCredit ? 'credit' : 'debit');
   }
 
   const id = addTransaction(phone, 'expense', parsed.amount, parsed.description, 'Geral', account?.id || null);
 
-  // Se for cartão de crédito, aumenta a dívida
   if (account && account.type === 'credit') {
     updateAccountBalance(account.id, parsed.amount);
   } else if (account && account.type === 'debit') {
@@ -331,6 +332,7 @@ function handleExpense(phone, text) {
 
   const { balance } = getBalance(phone);
   let msg = `✅ *Despesa registrada!*\n\n💸 ${formatCurrency(parsed.amount)}\n📝 ${parsed.description}`;
+
   if (account) {
     msg += `\n🏦 ${account.display_name}`;
     if (account.type === 'credit') {
@@ -338,19 +340,20 @@ function handleExpense(phone, text) {
       msg += ` (dívida agora: ${formatCurrency(updated.balance)})`;
     }
   }
+
   msg += `\n🆔 #${id}\n\nSaldo geral: *${formatCurrency(balance)}*`;
   return msg;
 }
 
 function handleIncome(phone, text) {
-  let parts = text
-    .replace(/^\/?entrada\s+|^\/?receita\s+|^\/?renda\s+/i, '')
-    .replace(/^(recebi|ganhei)\s+/i, '')
+  let cleanText = text
+    .replace(/^(entrada|receita|renda|recebi|ganhei)\s+/i, '')
     .replace(/entrada de\s+/i, '')
     .replace(/receita de\s+/i, '')
+    .replace(/^R\$\s*/i, '')
     .trim();
 
-  const parsed = parseAmountAndDescription(parts);
+  const parsed = parseAmountAndDescription(cleanText) || parseAmountAndDescription(text);
   if (!parsed) {
     return '❌ Não identifiquei o valor.\nEx: *entrada 2500 salário* ou *recebi 1800 do cliente*';
   }
@@ -375,15 +378,9 @@ function handleIncome(phone, text) {
 }
 
 function handlePayment(phone, text) {
-  // Exemplos:
-  // "paguei o Nubank"
-  // "paguei 1500 do Nubank"
-  // "paguei o cartão Nubank"
-
   const amount = extractAmount(text);
   let accountName = extractAccountFromText(text);
 
-  // Fallback: pega a última palavra forte
   if (!accountName) {
     const cleaned = text
       .toLowerCase()
@@ -399,7 +396,6 @@ function handlePayment(phone, text) {
 
   let account = findAccount(phone, accountName);
   if (!account) {
-    // Tenta criar como crédito se parecer cartão
     account = getOrCreateAccount(phone, accountName, 'credit');
   }
 
@@ -415,7 +411,6 @@ function handlePayment(phone, text) {
 
   const payAmount = amount && amount > 0 ? Math.min(amount, currentDebt) : currentDebt;
 
-  // Registra como payment (não conta como nova despesa no saldo geral)
   const id = addTransaction(
     phone,
     'payment',
@@ -441,16 +436,17 @@ function handlePayment(phone, text) {
 }
 
 function tryNaturalExpense(phone, text) {
-  // Frases do tipo "50 no Nubank", "dois mil de cartão Nubank", "200 no mercado"
+  // Frases do tipo "R$ 2.644,03 no Nubank", "50 no Nubank", "200 no mercado"
   const parsed = parseAmountAndDescription(text);
   if (!parsed) return null;
 
-  // Só considera se tiver alguma indicação de conta ou se for bem curto
   const hasAccountHint = /\b(no|na|do|da|em|cart[aã]o|nubank|inter|c6|neon)\b/i.test(text);
-  if (!hasAccountHint && parsed.description.length > 25) return null;
+  const hasCurrency = /R\$|reais?/i.test(text);
 
-  // Reutiliza a lógica de despesa
-  return handleExpense(phone, `gastei ${text}`);
+  // Só considera natural se tiver indicação de conta ou valor monetário explícito
+  if (!hasAccountHint && !hasCurrency && parsed.description.length > 25) return null;
+
+  return registerExpense(phone, parsed, text);
 }
 
 module.exports = {
