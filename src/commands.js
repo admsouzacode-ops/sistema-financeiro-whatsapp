@@ -3,296 +3,454 @@ const {
   getBalance,
   getTransactions,
   getSummaryByCategory,
-  deleteLastTransaction
+  deleteLastTransaction,
+  getOrCreateAccount,
+  findAccount,
+  getAccounts,
+  updateAccountBalance,
+  setAccountBalance
 } = require('./db');
 const { sendText, getMediaBase64 } = require('./evolution');
 const { transcribeAudio } = require('./transcription');
 const {
   formatCurrency,
   parseAmountAndDescription,
+  extractAmount,
   normalizePhone,
   isAllowed,
-  formatDate
+  formatDate,
+  extractAccountFromText
 } = require('./utils');
 
-const HELP_TEXT = `📊 *Sistema Financeiro WhatsApp*
+const HELP_TEXT = `📊 *Sistema Financeiro — MEI*
 
-Comandos disponíveis:
+*Comandos principais:*
 
-💰 *saldo* — Ver saldo atual
+💰 *saldo* — Visão geral
+📋 *extrato* — Últimas movimentações
+🏦 *contas* — Todas as contas e cartões
+💳 *cartões* — Só os cartões e dívidas
 
-📥 *entrada <valor> <descrição>*
-Ex: entrada 2500 salário
-Ex: receita 150 freelance
+*Registrar:*
+📥 *entrada 2500 salário*
+📤 *gasto 45,90 almoço*
+📤 *gastei 200 no Nubank*
 
-📤 *gasto <valor> <descrição>*
-Ex: gasto 45,90 almoço
-Ex: despesa 100 uber
+*Cartões / Contas:*
+• "gastei 50 no Nubank" → soma na dívida
+• "paguei o Nubank" → paga o total da dívida
+• "paguei 1000 do Nubank" → pagamento parcial
+• "criar cartão Nubank"
+• "criar conta Inter"
 
-📋 *extrato* — Últimas 10 transações
-📋 *extrato 20* — Últimas 20 transações
+🎤 *Pode mandar áudio também!*
 
-📊 *resumo* — Resumo por categoria
-
-🗑️ *desfazer* — Remove a última transação
-
-ℹ️ *ajuda* — Mostra esta mensagem
-
-🎤 *Você também pode enviar áudio!*
-Ex: "gastei 50 no mercado" ou "entrada de 2000 do salário"
-
-_Valores aceitam vírgula ou ponto (ex: 45,90 ou 45.90)_`;
+_Digite *ajuda* a qualquer momento_`;
 
 async function handleWebhook(payload) {
-  // Aceita tanto "messages.upsert" quanto "MESSAGES_UPSERT"
   const event = (payload.event || '').toLowerCase().replace(/_/g, '.');
-
-  if (event !== 'messages.upsert') {
-    return;
-  }
+  if (event !== 'messages.upsert') return;
 
   const data = payload.data;
   if (!data || !data.key) return;
-
-  // Ignora mensagens enviadas por mim mesmo
   if (data.key.fromMe) return;
 
-  // Ignora grupos
   const remoteJid = data.key.remoteJid || '';
   if (remoteJid.endsWith('@g.us')) return;
 
   const phone = normalizePhone(remoteJid);
-  if (!phone) return;
+  if (!phone || !isAllowed(phone)) return;
 
-  if (!isAllowed(phone)) {
-    console.log(`Número não autorizado: ${phone}`);
-    return;
-  }
-
-  // ===== ÁUDIO =====
+  // ÁUDIO
   if (data.message?.audioMessage) {
     console.log(`[${phone}] 🎧 Áudio recebido`);
-
-    // Avisa que está processando
-    await sendText(phone, '🎧 Processando seu áudio, aguarde...');
+    await sendText(phone, '🎧 Processando seu áudio...');
 
     try {
       const media = await getMediaBase64(data.key);
-
-      if (!media || !media.base64) {
-        await sendText(phone, '❌ Não consegui baixar o áudio. Tente novamente.');
+      if (!media?.base64) {
+        await sendText(phone, '❌ Não consegui baixar o áudio.');
         return;
       }
 
       const transcribed = await transcribeAudio(media.base64, media.mimetype);
-
       if (!transcribed) {
-        await sendText(phone, '❌ Não consegui entender o áudio. Tente falar mais claramente ou envie em texto.');
+        await sendText(phone, '❌ Não consegui entender o áudio. Tente de novo ou mande em texto.');
         return;
       }
 
       console.log(`[${phone}] Transcrito: ${transcribed}`);
-
-      // Processa o texto transcrito como se fosse um comando normal
       const reply = await processCommand(phone, transcribed);
-
       if (reply) {
-        // Mostra o que foi entendido + a resposta
         await sendText(phone, `🎤 *Entendi:* "${transcribed}"\n\n${reply}`);
       }
     } catch (err) {
-      console.error('Erro ao processar áudio:', err);
-      await sendText(phone, '❌ Ocorreu um erro ao processar o áudio. Tente novamente.');
+      console.error('Erro áudio:', err);
+      await sendText(phone, '❌ Erro ao processar o áudio.');
     }
-
     return;
   }
 
-  // ===== TEXTO =====
-  let text = '';
-  if (data.message?.conversation) {
-    text = data.message.conversation;
-  } else if (data.message?.extendedTextMessage?.text) {
-    text = data.message.extendedTextMessage.text;
-  } else {
-    return; // Tipo de mensagem não suportado
-  }
-
+  // TEXTO
+  let text = data.message?.conversation || data.message?.extendedTextMessage?.text || '';
   text = text.trim();
   if (!text) return;
 
   console.log(`[${phone}] ${text}`);
-
   const reply = await processCommand(phone, text);
-  if (reply) {
-    await sendText(phone, reply);
-  }
+  if (reply) await sendText(phone, reply);
 }
 
 async function processCommand(phone, text) {
   const lower = text.toLowerCase().trim();
-
-  // Remove / se existir
   const cmd = lower.startsWith('/') ? lower.slice(1) : lower;
 
   // AJUDA
-  if (['ajuda', 'help', 'menu', 'comandos', 'inicio', 'start'].includes(cmd) || cmd === '') {
+  if (['ajuda', 'help', 'menu', 'comandos', 'inicio', 'start'].includes(cmd)) {
     return HELP_TEXT;
   }
 
-  // SALDO
-  if (cmd === 'saldo' || cmd === 'balance') {
-    const { income, expense, balance } = getBalance(phone);
-    const emoji = balance >= 0 ? '🟢' : '🔴';
-
-    return `${emoji} *Seu saldo atual*\n\n` +
-      `📥 Receitas: ${formatCurrency(income)}\n` +
-      `📤 Despesas: ${formatCurrency(expense)}\n` +
-      `━━━━━━━━━━━━━━\n` +
-      `💰 *Saldo: ${formatCurrency(balance)}*`;
+  // ===== CONTAS / CARTÕES =====
+  if (cmd === 'contas' || cmd === 'conta' || cmd.includes('minhas contas')) {
+    return formatAccountsList(phone);
   }
 
-  // ENTRADA / RECEITA (também aceita frases naturais do áudio)
+  if (cmd === 'cartões' || cmd === 'cartoes' || cmd === 'cartão' || cmd === 'cartao' || cmd.includes('meus cartões') || cmd.includes('meus cartoes')) {
+    return formatCardsList(phone);
+  }
+
+  // Criar conta / cartão
+  if (cmd.startsWith('criar cartão ') || cmd.startsWith('criar cartao ') || cmd.startsWith('novo cartão ') || cmd.startsWith('novo cartao ')) {
+    const name = text.replace(/^(criar|novo)\s+cart[aã]o\s+/i, '').trim();
+    if (!name) return '❌ Diga o nome do cartão.\nEx: *criar cartão Nubank*';
+
+    const account = getOrCreateAccount(phone, name, 'credit');
+    return `✅ Cartão *${account.display_name}* criado!\n\nAgora é só falar:\n• "gastei 100 no ${account.display_name}"\n• "paguei o ${account.display_name}"`;
+  }
+
+  if (cmd.startsWith('criar conta ') || cmd.startsWith('nova conta ')) {
+    const name = text.replace(/^(criar|nova)\s+conta\s+/i, '').trim();
+    if (!name) return '❌ Diga o nome da conta.\nEx: *criar conta Inter*';
+
+    const account = getOrCreateAccount(phone, name, 'debit');
+    return `✅ Conta *${account.display_name}* criada!`;
+  }
+
+  // ===== PAGAR CARTÃO =====
+  if (cmd.startsWith('paguei ') || cmd.startsWith('pagar ') || cmd.startsWith('paguei o ') || cmd.startsWith('paguei a ')) {
+    return handlePayment(phone, text);
+  }
+
+  // ===== SALDO =====
+  if (cmd === 'saldo' || cmd === 'balance' || cmd.includes('meu saldo')) {
+    return formatFullBalance(phone);
+  }
+
+  // ===== ENTRADA / RECEITA =====
   if (
-    cmd.startsWith('entrada ') ||
-    cmd.startsWith('receita ') ||
-    cmd.startsWith('renda ') ||
-    cmd.startsWith('recebi ') ||
-    cmd.startsWith('ganhei ') ||
-    cmd.includes('entrada de') ||
-    cmd.includes('receita de')
+    cmd.startsWith('entrada ') || cmd.startsWith('receita ') || cmd.startsWith('renda ') ||
+    cmd.startsWith('recebi ') || cmd.startsWith('ganhei ') ||
+    cmd.includes('entrada de') || cmd.includes('receita de')
   ) {
-    // Tenta extrair valor e descrição de forma mais flexível
-    let parts = text
-      .replace(/^\/?entrada\s+|^\/?receita\s+|^\/?renda\s+/i, '')
-      .replace(/^(recebi|ganhei)\s+/i, '')
-      .replace(/entrada de\s+/i, '')
-      .replace(/receita de\s+/i, '')
-      .trim();
-
-    const parsed = parseAmountAndDescription(parts);
-
-    if (!parsed) {
-      return '❌ Não consegui identificar o valor.\nExemplo: *entrada 2500 salário* ou diga "recebi 2500 do salário"';
-    }
-
-    const id = addTransaction(phone, 'income', parsed.amount, parsed.description);
-    const { balance } = getBalance(phone);
-
-    return `✅ *Receita registrada!*\n\n` +
-      `💰 Valor: ${formatCurrency(parsed.amount)}\n` +
-      `📝 ${parsed.description}\n` +
-      `🆔 #${id}\n\n` +
-      `Saldo atual: *${formatCurrency(balance)}*`;
+    return handleIncome(phone, text);
   }
 
-  // GASTO / DESPESA (aceita frases naturais)
+  // ===== GASTO / DESPESA =====
   if (
-    cmd.startsWith('gasto ') ||
-    cmd.startsWith('despesa ') ||
-    cmd.startsWith('saida ') ||
-    cmd.startsWith('gastei ') ||
-    cmd.startsWith('paguei ') ||
-    cmd.includes('gastei ') ||
-    cmd.includes('paguei ')
+    cmd.startsWith('gasto ') || cmd.startsWith('despesa ') || cmd.startsWith('saida ') ||
+    cmd.startsWith('gastei ') || cmd.startsWith('paguei ') || // paguei já tratado acima, mas deixa
+    cmd.includes('gastei ') || cmd.includes('paguei ')
   ) {
-    let parts = text
-      .replace(/^\/?gasto\s+|^\/?despesa\s+|^\/?saida\s+/i, '')
-      .replace(/^(gastei|paguei)\s+/i, '')
-      .trim();
-
-    const parsed = parseAmountAndDescription(parts);
-
-    if (!parsed) {
-      return '❌ Não consegui identificar o valor.\nExemplo: *gasto 45,90 almoço* ou diga "gastei 50 no mercado"';
+    // Se chegou aqui e tem "paguei", já foi tratado. Só processa gasto normal.
+    if (cmd.startsWith('paguei ') || cmd.startsWith('pagar ')) {
+      return handlePayment(phone, text);
     }
-
-    const id = addTransaction(phone, 'expense', parsed.amount, parsed.description);
-    const { balance } = getBalance(phone);
-
-    return `✅ *Despesa registrada!*\n\n` +
-      `💸 Valor: ${formatCurrency(parsed.amount)}\n` +
-      `📝 ${parsed.description}\n` +
-      `🆔 #${id}\n\n` +
-      `Saldo atual: *${formatCurrency(balance)}*`;
+    return handleExpense(phone, text);
   }
 
-  // EXTRATO
+  // Frases naturais de gasto sem a palavra "gastei"
+  // Ex: "50 no Nubank", "dois mil de cartão Nubank"
+  const naturalExpense = tryNaturalExpense(phone, text);
+  if (naturalExpense) return naturalExpense;
+
+  // ===== EXTRATO =====
   if (cmd === 'extrato' || cmd.startsWith('extrato ') || cmd.includes('extrato') || cmd.includes('últimas') || cmd.includes('ultimas')) {
     let limit = 10;
     const match = cmd.match(/(\d+)/);
-    if (match) {
-      limit = Math.min(Math.max(parseInt(match[1], 10), 1), 50);
-    }
+    if (match) limit = Math.min(Math.max(parseInt(match[1], 10), 1), 50);
 
     const txs = getTransactions(phone, limit);
+    if (txs.length === 0) return '📭 Nenhuma movimentação ainda.';
 
-    if (txs.length === 0) {
-      return '📭 Nenhuma transação encontrada.';
-    }
-
-    let msg = `📋 *Últimas ${txs.length} transações*\n\n`;
-
+    let msg = `📋 *Últimas ${txs.length} movimentações*\n\n`;
     for (const tx of txs) {
-      const icon = tx.type === 'income' ? '📥' : '📤';
+      const icon = tx.type === 'income' ? '📥' : tx.type === 'payment' ? '💳' : '📤';
       const sign = tx.type === 'income' ? '+' : '-';
-      msg += `${icon} ${sign}${formatCurrency(tx.amount)}\n`;
-      msg += `   ${tx.description}\n`;
+      msg += `${icon} ${sign}${formatCurrency(tx.amount)}`;
+      if (tx.account_name) msg += ` · ${tx.account_name}`;
+      msg += `\n   ${tx.description}\n`;
       msg += `   ${formatDate(tx.created_at)} · #${tx.id}\n\n`;
     }
 
     const { balance } = getBalance(phone);
-    msg += `━━━━━━━━━━━━━━\n💰 Saldo: *${formatCurrency(balance)}*`;
-
+    msg += `━━━━━━━━━━━━━━\n💰 Saldo geral: *${formatCurrency(balance)}*`;
     return msg;
   }
 
-  // RESUMO
+  // ===== RESUMO =====
   if (cmd === 'resumo' || cmd === 'categorias' || cmd === 'relatorio' || cmd.includes('resumo')) {
     const summary = getSummaryByCategory(phone);
-
-    if (summary.length === 0) {
-      return '📭 Nenhuma transação para resumir.';
-    }
+    if (summary.length === 0) return '📭 Nenhuma movimentação para resumir.';
 
     let msg = '📊 *Resumo por categoria*\n\n';
-
     const incomes = summary.filter(s => s.type === 'income');
     const expenses = summary.filter(s => s.type === 'expense');
 
     if (incomes.length) {
       msg += '*Receitas:*\n';
-      for (const s of incomes) {
-        msg += `📥 ${s.category}: ${formatCurrency(s.total)} (${s.count}x)\n`;
-      }
+      for (const s of incomes) msg += `📥 ${s.category}: ${formatCurrency(s.total)} (${s.count}x)\n`;
       msg += '\n';
     }
-
     if (expenses.length) {
       msg += '*Despesas:*\n';
-      for (const s of expenses) {
-        msg += `📤 ${s.category}: ${formatCurrency(s.total)} (${s.count}x)\n`;
-      }
+      for (const s of expenses) msg += `📤 ${s.category}: ${formatCurrency(s.total)} (${s.count}x)\n`;
     }
 
     const { balance } = getBalance(phone);
     msg += `\n━━━━━━━━━━━━━━\n💰 Saldo: *${formatCurrency(balance)}*`;
-
     return msg;
   }
 
-  // DESFAZER
-  if (cmd === 'desfazer' || cmd === 'undo' || cmd === 'apagar' || cmd.includes('desfazer') || cmd.includes('apagar última')) {
+  // ===== DESFAZER =====
+  if (cmd === 'desfazer' || cmd === 'undo' || cmd === 'apagar' || cmd.includes('desfazer')) {
     const id = deleteLastTransaction(phone);
-    if (!id) {
-      return '📭 Nenhuma transação para desfazer.';
-    }
+    if (!id) return '📭 Nenhuma movimentação para desfazer.';
     const { balance } = getBalance(phone);
-    return `🗑️ Transação #${id} removida.\n\nSaldo atual: *${formatCurrency(balance)}*`;
+    return `🗑️ Movimentação #${id} removida.\n\nSaldo geral: *${formatCurrency(balance)}*`;
   }
 
-  // Comando não reconhecido
-  return `❓ Não entendi o comando.\n\nDigite *ajuda* para ver os comandos disponíveis.\n\nOu envie um áudio dizendo por exemplo:\n• "gastei 50 no mercado"\n• "recebi 2000 do salário"`;
+  return `❓ Não entendi.\n\nDigite *ajuda* para ver os comandos.\n\nExemplos de áudio/texto:\n• "gastei 80 no Nubank"\n• "recebi 3000 do cliente"\n• "paguei o Nubank"\n• "qual meu saldo"`;
+}
+
+// ==================== HELPERS ====================
+
+function formatFullBalance(phone) {
+  const { income, expense, balance } = getBalance(phone);
+  const accounts = getAccounts(phone);
+
+  let msg = `💰 *Visão Geral*\n\n`;
+  msg += `📥 Receitas: ${formatCurrency(income)}\n`;
+  msg += `📤 Despesas: ${formatCurrency(expense)}\n`;
+  msg += `━━━━━━━━━━━━━━\n`;
+  msg += `💵 *Saldo geral: ${formatCurrency(balance)}*\n`;
+
+  if (accounts.length > 0) {
+    msg += `\n🏦 *Contas & Cartões*\n`;
+    for (const acc of accounts) {
+      if (acc.type === 'credit') {
+        const debt = acc.balance;
+        msg += debt > 0
+          ? `💳 ${acc.display_name}: *deve ${formatCurrency(debt)}*\n`
+          : `💳 ${acc.display_name}: sem dívida\n`;
+      } else {
+        msg += `🏦 ${acc.display_name}: ${formatCurrency(acc.balance)}\n`;
+      }
+    }
+  }
+
+  return msg;
+}
+
+function formatAccountsList(phone) {
+  const accounts = getAccounts(phone);
+  if (accounts.length === 0) {
+    return '📭 Nenhuma conta cadastrada ainda.\n\nCrie com:\n• *criar cartão Nubank*\n• *criar conta Inter*\n\nOu simplesmente fale "gastei 50 no Nubank" que ele cria sozinho.';
+  }
+
+  let msg = '🏦 *Suas Contas & Cartões*\n\n';
+  for (const acc of accounts) {
+    if (acc.type === 'credit') {
+      msg += acc.balance > 0
+        ? `💳 *${acc.display_name}* → deve ${formatCurrency(acc.balance)}\n`
+        : `💳 *${acc.display_name}* → sem dívida\n`;
+    } else {
+      msg += `🏦 *${acc.display_name}* → ${formatCurrency(acc.balance)}\n`;
+    }
+  }
+  return msg;
+}
+
+function formatCardsList(phone) {
+  const accounts = getAccounts(phone).filter(a => a.type === 'credit');
+  if (accounts.length === 0) {
+    return '📭 Nenhum cartão cadastrado.\n\nCrie com: *criar cartão Nubank*\nOu fale "gastei 100 no Nubank".';
+  }
+
+  let msg = '💳 *Seus Cartões*\n\n';
+  let totalDebt = 0;
+  for (const acc of accounts) {
+    totalDebt += acc.balance;
+    msg += acc.balance > 0
+      ? `• *${acc.display_name}*: deve ${formatCurrency(acc.balance)}\n`
+      : `• *${acc.display_name}*: sem dívida\n`;
+  }
+  msg += `\n━━━━━━━━━━━━━━\n💸 *Total em dívidas: ${formatCurrency(totalDebt)}*`;
+  return msg;
+}
+
+function handleExpense(phone, text) {
+  let parts = text
+    .replace(/^\/?gasto\s+|^\/?despesa\s+|^\/?saida\s+/i, '')
+    .replace(/^(gastei|paguei)\s+/i, '')
+    .trim();
+
+  const parsed = parseAmountAndDescription(parts);
+  if (!parsed) {
+    return '❌ Não identifiquei o valor.\nEx: *gastei 45,90 almoço* ou *gastei 200 no Nubank*';
+  }
+
+  // Tenta detectar conta no texto
+  const accountName = extractAccountFromText(text) || extractAccountFromText(parsed.description);
+  let account = null;
+
+  if (accountName) {
+    // Se menciona cartão ou nomes comuns de cartão, cria como credit
+    const isLikelyCredit = /nubank|inter|c6|neon|will|picpay|cart[aã]o|credit/i.test(accountName) ||
+                           /nubank|inter|c6|neon|will|picpay|cart[aã]o|credit/i.test(text);
+    account = getOrCreateAccount(phone, accountName, isLikelyCredit ? 'credit' : 'debit');
+  }
+
+  const id = addTransaction(phone, 'expense', parsed.amount, parsed.description, 'Geral', account?.id || null);
+
+  // Se for cartão de crédito, aumenta a dívida
+  if (account && account.type === 'credit') {
+    updateAccountBalance(account.id, parsed.amount);
+  } else if (account && account.type === 'debit') {
+    updateAccountBalance(account.id, -parsed.amount);
+  }
+
+  const { balance } = getBalance(phone);
+  let msg = `✅ *Despesa registrada!*\n\n💸 ${formatCurrency(parsed.amount)}\n📝 ${parsed.description}`;
+  if (account) {
+    msg += `\n🏦 ${account.display_name}`;
+    if (account.type === 'credit') {
+      const updated = findAccount(phone, account.name);
+      msg += ` (dívida agora: ${formatCurrency(updated.balance)})`;
+    }
+  }
+  msg += `\n🆔 #${id}\n\nSaldo geral: *${formatCurrency(balance)}*`;
+  return msg;
+}
+
+function handleIncome(phone, text) {
+  let parts = text
+    .replace(/^\/?entrada\s+|^\/?receita\s+|^\/?renda\s+/i, '')
+    .replace(/^(recebi|ganhei)\s+/i, '')
+    .replace(/entrada de\s+/i, '')
+    .replace(/receita de\s+/i, '')
+    .trim();
+
+  const parsed = parseAmountAndDescription(parts);
+  if (!parsed) {
+    return '❌ Não identifiquei o valor.\nEx: *entrada 2500 salário* ou *recebi 1800 do cliente*';
+  }
+
+  const accountName = extractAccountFromText(text) || extractAccountFromText(parsed.description);
+  let account = null;
+  if (accountName) {
+    account = getOrCreateAccount(phone, accountName, 'debit');
+  }
+
+  const id = addTransaction(phone, 'income', parsed.amount, parsed.description, 'Geral', account?.id || null);
+
+  if (account) {
+    updateAccountBalance(account.id, parsed.amount);
+  }
+
+  const { balance } = getBalance(phone);
+  let msg = `✅ *Receita registrada!*\n\n💰 ${formatCurrency(parsed.amount)}\n📝 ${parsed.description}`;
+  if (account) msg += `\n🏦 ${account.display_name}`;
+  msg += `\n🆔 #${id}\n\nSaldo geral: *${formatCurrency(balance)}*`;
+  return msg;
+}
+
+function handlePayment(phone, text) {
+  // Exemplos:
+  // "paguei o Nubank"
+  // "paguei 1500 do Nubank"
+  // "paguei o cartão Nubank"
+
+  const amount = extractAmount(text);
+  let accountName = extractAccountFromText(text);
+
+  // Fallback: pega a última palavra forte
+  if (!accountName) {
+    const cleaned = text
+      .toLowerCase()
+      .replace(/paguei|pagar|o|a|do|da|cart[aã]o|conta|de|reais?|r\$/gi, '')
+      .replace(/[\d.,]/g, '')
+      .trim();
+    if (cleaned.length >= 2) accountName = cleaned;
+  }
+
+  if (!accountName) {
+    return '❌ Não identifiquei o cartão/conta.\nEx: *paguei o Nubank* ou *paguei 1500 do Nubank*';
+  }
+
+  let account = findAccount(phone, accountName);
+  if (!account) {
+    // Tenta criar como crédito se parecer cartão
+    account = getOrCreateAccount(phone, accountName, 'credit');
+  }
+
+  if (account.type !== 'credit') {
+    return `ℹ️ *${account.display_name}* não é um cartão de crédito.\nUse "gastei" ou "entrada" para movimentar contas normais.`;
+  }
+
+  const currentDebt = account.balance;
+
+  if (currentDebt <= 0) {
+    return `✅ O cartão *${account.display_name}* não tem dívida no momento.`;
+  }
+
+  const payAmount = amount && amount > 0 ? Math.min(amount, currentDebt) : currentDebt;
+
+  // Registra como payment (não conta como nova despesa no saldo geral)
+  const id = addTransaction(
+    phone,
+    'payment',
+    payAmount,
+    `Pagamento ${account.display_name}`,
+    'Pagamento Cartão',
+    account.id
+  );
+
+  updateAccountBalance(account.id, -payAmount);
+
+  const remaining = currentDebt - payAmount;
+
+  let msg = `✅ *Pagamento registrado!*\n\n💳 ${account.display_name}\n💸 ${formatCurrency(payAmount)}`;
+  if (remaining > 0) {
+    msg += `\n\nAinda resta: *${formatCurrency(remaining)}*`;
+  } else {
+    msg += `\n\n🎉 *Cartão quitado!*`;
+  }
+  msg += `\n🆔 #${id}`;
+
+  return msg;
+}
+
+function tryNaturalExpense(phone, text) {
+  // Frases do tipo "50 no Nubank", "dois mil de cartão Nubank", "200 no mercado"
+  const parsed = parseAmountAndDescription(text);
+  if (!parsed) return null;
+
+  // Só considera se tiver alguma indicação de conta ou se for bem curto
+  const hasAccountHint = /\b(no|na|do|da|em|cart[aã]o|nubank|inter|c6|neon)\b/i.test(text);
+  if (!hasAccountHint && parsed.description.length > 25) return null;
+
+  // Reutiliza a lógica de despesa
+  return handleExpense(phone, `gastei ${text}`);
 }
 
 module.exports = {

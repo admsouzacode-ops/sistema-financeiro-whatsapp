@@ -34,6 +34,22 @@ function parseAmountAndDescription(text) {
 }
 
 /**
+ * Tenta extrair um valor de qualquer lugar da frase
+ * Ex: "paguei 1500 do nubank" → 1500
+ */
+function extractAmount(text) {
+  const match = text.match(/([\d.,]+)/);
+  if (!match) return null;
+
+  let amountStr = match[1]
+    .replace(/\./g, '')
+    .replace(',', '.');
+
+  const amount = parseFloat(amountStr);
+  return isNaN(amount) || amount <= 0 ? null : amount;
+}
+
+/**
  * Normaliza o número de telefone (remove tudo que não é dígito)
  */
 function normalizePhone(jid) {
@@ -70,10 +86,39 @@ function formatDate(dateStr) {
   }
 }
 
+/**
+ * Detecta se o texto menciona um cartão/conta conhecido
+ * e tenta extrair o nome da conta
+ */
+function extractAccountFromText(text) {
+  const lower = text.toLowerCase();
+
+  // Palavras que geralmente precedem o nome da conta
+  const patterns = [
+    /(?:no|na|do|da|em|pelo|pela)\s+([a-z0-9\s]{2,30}?)(?:\s|$|,|\.|!|\?)/i,
+    /cart[aã]o\s+([a-z0-9\s]{2,20})/i,
+    /conta\s+([a-z0-9\s]{2,20})/i
+  ];
+
+  for (const pattern of patterns) {
+    const match = lower.match(pattern);
+    if (match && match[1]) {
+      let name = match[1].trim();
+      // Remove palavras comuns que não fazem parte do nome
+      name = name.replace(/\b(reais?|real|r\$|de|do|da|no|na|em|com|para|por)\b/gi, '').trim();
+      if (name.length >= 2) return name;
+    }
+  }
+
+  return null;
+}
+
 module.exports = {
   formatCurrency,
   parseAmountAndDescription,
+  extractAmount,
   normalizePhone,
   isAllowed,
-  formatDate
+  formatDate,
+  extractAccountFromText
 };
