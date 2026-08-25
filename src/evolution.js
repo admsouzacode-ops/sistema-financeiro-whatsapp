@@ -6,13 +6,11 @@ const api = axios.create({
     apikey: process.env.EVOLUTION_API_KEY,
     'Content-Type': 'application/json'
   },
-  timeout: 15000
+  timeout: 30000
 });
 
 /**
  * Envia mensagem de texto via Evolution API
- * @param {string} number - Número com DDI (ex: 5511999999999) ou com @s.whatsapp.net
- * @param {string} text - Texto da mensagem
  */
 async function sendText(number, text) {
   if (!process.env.EVOLUTION_API_URL || !process.env.EVOLUTION_API_KEY || !process.env.EVOLUTION_INSTANCE) {
@@ -36,6 +34,46 @@ async function sendText(number, text) {
   }
 }
 
+/**
+ * Baixa mídia (áudio, imagem, etc) em base64 a partir da mensagem
+ */
+async function getMediaBase64(messageKey) {
+  const instance = process.env.EVOLUTION_INSTANCE;
+
+  try {
+    const response = await api.post(`/chat/getBase64FromMediaMessage/${instance}`, {
+      message: {
+        key: {
+          id: messageKey.id
+        }
+      },
+      convertToMp4: false
+    });
+
+    // A resposta pode vir de formas diferentes dependendo da versão da Evolution
+    const data = response.data;
+
+    if (data?.base64) {
+      return {
+        base64: data.base64,
+        mimetype: data.mimetype || 'audio/ogg'
+      };
+    }
+
+    // Algumas versões retornam o base64 direto no root
+    if (typeof data === 'string') {
+      return { base64: data, mimetype: 'audio/ogg' };
+    }
+
+    console.error('Resposta inesperada do getBase64FromMediaMessage:', data);
+    return null;
+  } catch (error) {
+    console.error('❌ Erro ao baixar mídia:', error.response?.data || error.message);
+    return null;
+  }
+}
+
 module.exports = {
-  sendText
+  sendText,
+  getMediaBase64
 };
