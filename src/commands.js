@@ -1,7 +1,10 @@
 const {
   addTransaction,
   getBalance,
+  getBalanceForPeriod,
+  getMonthRange,
   getTransactions,
+  getTransactionsForPeriod,
   getSummaryByCategory,
   deleteLastTransaction,
   getOrCreateAccount,
@@ -25,26 +28,25 @@ const HELP_TEXT = `📊 *Sistema Financeiro — MEI*
 
 *Comandos principais:*
 
-💰 *saldo* — Visão geral
+💰 *saldo* — Visão geral (todo o histórico)
+📅 *mês* — Resumo do mês atual
+📅 *mês passado* — Resumo do mês anterior
 📋 *extrato* — Últimas movimentações
+📋 *extrato mês* — Movimentações deste mês
 🏦 *contas* — Todas as contas e cartões
 💳 *cartões* — Só os cartões e dívidas
 
 *Registrar:*
 📥 *entrada 2500 salário*
-📤 *gasto 45,90 almoço*
+📤 *gastei 45,90 almoço*
 📤 *gastei 200 no Nubank*
 
-*Cartões / Contas:*
+*Cartões:*
 • "gastei 50 no Nubank" → soma na dívida
-• "paguei o Nubank" → paga o total da dívida
+• "paguei o Nubank" → quita a dívida
 • "paguei 1000 do Nubank" → pagamento parcial
-• "criar cartão Nubank"
-• "criar conta Inter"
 
-🎤 *Pode mandar áudio também!*
-
-_Digite *ajuda* a qualquer momento_`;
+🎤 *Pode mandar áudio também!*`;
 
 async function handleWebhook(payload) {
   const event = (payload.event || '').toLowerCase().replace(/_/g, '.');
@@ -109,6 +111,36 @@ async function processCommand(phone, text) {
     return HELP_TEXT;
   }
 
+  // ===== MÊS ATUAL =====
+  if (
+    cmd === 'mês' || cmd === 'mes' ||
+    cmd === 'esse mês' || cmd === 'esse mes' ||
+    cmd === 'mês atual' || cmd === 'mes atual' ||
+    cmd === 'este mês' || cmd === 'este mes' ||
+    cmd.includes('resumo do mês') || cmd.includes('resumo do mes') ||
+    cmd.includes('quanto gastei esse mês') || cmd.includes('quanto gastei esse mes')
+  ) {
+    return formatMonthSummary(phone, 'current');
+  }
+
+  // ===== MÊS PASSADO =====
+  if (
+    cmd === 'mês passado' || cmd === 'mes passado' ||
+    cmd === 'mês anterior' || cmd === 'mes anterior' ||
+    cmd.includes('mês passado') || cmd.includes('mes passado')
+  ) {
+    return formatMonthSummary(phone, 'previous');
+  }
+
+  // ===== EXTRATO DO MÊS =====
+  if (
+    cmd === 'extrato mês' || cmd === 'extrato mes' ||
+    cmd === 'extrato do mês' || cmd === 'extrato do mes' ||
+    cmd.includes('extrato mês') || cmd.includes('extrato mes')
+  ) {
+    return formatMonthExtrato(phone, 'current');
+  }
+
   // ===== CONTAS / CARTÕES =====
   if (cmd === 'contas' || cmd === 'conta' || cmd.includes('minhas contas')) {
     return formatAccountsList(phone);
@@ -140,7 +172,7 @@ async function processCommand(phone, text) {
     return handlePayment(phone, text);
   }
 
-  // ===== SALDO =====
+  // ===== SALDO GERAL =====
   if (cmd === 'saldo' || cmd === 'balance' || cmd.includes('meu saldo') || cmd.includes('qual meu saldo') || cmd.includes('qual é o meu saldo')) {
     return formatFullBalance(phone);
   }
@@ -162,11 +194,11 @@ async function processCommand(phone, text) {
     return handleExpense(phone, text);
   }
 
-  // Frases naturais de gasto (ex: "50 no Nubank", "R$ 2.644,03 no Nubank")
+  // Frases naturais de gasto
   const naturalExpense = tryNaturalExpense(phone, text);
   if (naturalExpense) return naturalExpense;
 
-  // ===== EXTRATO =====
+  // ===== EXTRATO GERAL =====
   if (cmd === 'extrato' || cmd.startsWith('extrato ') || cmd.includes('extrato') || cmd.includes('últimas') || cmd.includes('ultimas')) {
     let limit = 10;
     const match = cmd.match(/(\d+)/);
@@ -222,20 +254,80 @@ async function processCommand(phone, text) {
     return `🗑️ Movimentação #${id} removida.\n\nSaldo geral: *${formatCurrency(balance)}*`;
   }
 
-  return `❓ Não entendi.\n\nDigite *ajuda* para ver os comandos.\n\nExemplos:\n• "gastei 80 no Nubank"\n• "recebi 3000 do cliente"\n• "paguei o Nubank"\n• "qual meu saldo"`;
+  return `❓ Não entendi.\n\nDigite *ajuda* para ver os comandos.\n\nExemplos:\n• "gastei 80 no Nubank"\n• "recebi 3000 do cliente"\n• "mês" → resumo deste mês\n• "paguei o Nubank"`;
 }
 
 // ==================== HELPERS ====================
 
-function formatFullBalance(phone) {
-  const { income, expense, balance } = getBalance(phone);
-  const accounts = getAccounts(phone);
+function formatMonthSummary(phone, which = 'current') {
+  const range = getMonthRange(which);
+  const { income, expense, balance } = getBalanceForPeriod(phone, range.start, range.end);
 
-  let msg = `💰 *Visão Geral*\n\n`;
+  const title = which === 'current' ? '📅 *Mês Atual*' : '📅 *Mês Passado*';
+
+  let msg = `${title} — ${range.label}\n\n`;
   msg += `📥 Receitas: ${formatCurrency(income)}\n`;
   msg += `📤 Despesas: ${formatCurrency(expense)}\n`;
   msg += `━━━━━━━━━━━━━━\n`;
+
+  const emoji = balance >= 0 ? '🟢' : '🔴';
+  msg += `${emoji} *Resultado do mês: ${formatCurrency(balance)}*`;
+
+  // Mostra também quantas movimentações teve
+  const txs = getTransactionsForPeriod(phone, range.start, range.end, 1000);
+  if (txs.length > 0) {
+    msg += `\n\n📋 ${txs.length} movimentação(ões) neste mês`;
+  } else {
+    msg += `\n\n📭 Nenhuma movimentação neste mês ainda.`;
+  }
+
+  return msg;
+}
+
+function formatMonthExtrato(phone, which = 'current') {
+  const range = getMonthRange(which);
+  const txs = getTransactionsForPeriod(phone, range.start, range.end, 30);
+
+  if (txs.length === 0) {
+    return `📭 Nenhuma movimentação em *${range.label}*.`;
+  }
+
+  let msg = `📋 *Extrato — ${range.label}*\n\n`;
+
+  for (const tx of txs) {
+    const icon = tx.type === 'income' ? '📥' : tx.type === 'payment' ? '💳' : '📤';
+    const sign = tx.type === 'income' ? '+' : '-';
+    msg += `${icon} ${sign}${formatCurrency(tx.amount)}`;
+    if (tx.account_name) msg += ` · ${tx.account_name}`;
+    msg += `\n   ${tx.description}\n`;
+    msg += `   ${formatDate(tx.created_at)} · #${tx.id}\n\n`;
+  }
+
+  const { income, expense, balance } = getBalanceForPeriod(phone, range.start, range.end);
+  msg += `━━━━━━━━━━━━━━\n`;
+  msg += `📥 ${formatCurrency(income)}  📤 ${formatCurrency(expense)}\n`;
+  msg += `💰 Resultado: *${formatCurrency(balance)}*`;
+
+  return msg;
+}
+
+function formatFullBalance(phone) {
+  const { income, expense, balance } = getBalance(phone);
+  const accounts = getAccounts(phone);
+  const currentMonth = getMonthRange('current');
+  const monthData = getBalanceForPeriod(phone, currentMonth.start, currentMonth.end);
+
+  let msg = `💰 *Visão Geral*\n\n`;
+  msg += `📥 Receitas (total): ${formatCurrency(income)}\n`;
+  msg += `📤 Despesas (total): ${formatCurrency(expense)}\n`;
+  msg += `━━━━━━━━━━━━━━\n`;
   msg += `💵 *Saldo geral: ${formatCurrency(balance)}*\n`;
+
+  // Destaque do mês atual
+  msg += `\n📅 *${currentMonth.label}*\n`;
+  msg += `   Receitas: ${formatCurrency(monthData.income)}\n`;
+  msg += `   Despesas: ${formatCurrency(monthData.expense)}\n`;
+  msg += `   Resultado: *${formatCurrency(monthData.balance)}*\n`;
 
   if (accounts.length > 0) {
     msg += `\n🏦 *Contas & Cartões*\n`;
@@ -292,27 +384,20 @@ function formatCardsList(phone) {
 }
 
 function handleExpense(phone, text) {
-  // Remove palavras de comando para facilitar o parse
   let cleanText = text
     .replace(/^(gastei|gasto|despesa|saida)\s+/i, '')
     .replace(/^R\$\s*/i, '')
     .trim();
 
-  const parsed = parseAmountAndDescription(cleanText);
+  const parsed = parseAmountAndDescription(cleanText) || parseAmountAndDescription(text);
   if (!parsed) {
-    // Tenta de novo no texto original (caso o R$ atrapalhe)
-    const parsed2 = parseAmountAndDescription(text);
-    if (!parsed2) {
-      return '❌ Não identifiquei o valor.\nEx: *gastei 45,90 almoço* ou *gastei 200 no Nubank*';
-    }
-    return registerExpense(phone, parsed2, text);
+    return '❌ Não identifiquei o valor.\nEx: *gastei 45,90 almoço* ou *gastei 200 no Nubank*';
   }
 
   return registerExpense(phone, parsed, text);
 }
 
 function registerExpense(phone, parsed, originalText) {
-  // Tenta detectar conta no texto
   const accountName = extractAccountFromText(originalText) || extractAccountFromText(parsed.description);
   let account = null;
 
@@ -436,14 +521,12 @@ function handlePayment(phone, text) {
 }
 
 function tryNaturalExpense(phone, text) {
-  // Frases do tipo "R$ 2.644,03 no Nubank", "50 no Nubank", "200 no mercado"
   const parsed = parseAmountAndDescription(text);
   if (!parsed) return null;
 
   const hasAccountHint = /\b(no|na|do|da|em|cart[aã]o|nubank|inter|c6|neon)\b/i.test(text);
   const hasCurrency = /R\$|reais?/i.test(text);
 
-  // Só considera natural se tiver indicação de conta ou valor monetário explícito
   if (!hasAccountHint && !hasCurrency && parsed.description.length > 25) return null;
 
   return registerExpense(phone, parsed, text);
